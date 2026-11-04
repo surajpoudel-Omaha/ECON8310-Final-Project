@@ -1,0 +1,126 @@
+"""
+Observation 1 check: does the seasonal swing in housing starts scale with
+the level (multiplicative seasonality)?
+
+Usage: python observation1.py housing_data.csv
+Outputs: observation1.png and printed evidence.
+"""
+import sys
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from statsmodels.tsa.seasonal import STL
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+
+df = pd.read_csv(sys.argv[1] if len(sys.argv) > 1 else "housing_data.csv",
+                 parse_dates=["date"], index_col="date")
+y = df["starts"].asfreq("MS")
+full = y.loc[:"2025-12-01"]                      # full calendar years only
+yr = full.index.year
+
+# ---- 1. When do starts peak and bottom out? -------------------------------
+peak_m = full.groupby(yr).idxmax().dt.month
+low_m = full.groupby(yr).idxmin().dt.month
+n = len(peak_m)
+print(f"Years analysed: {peak_m.index.min()}-{peak_m.index.max()} ({n} full years)")
+print(f"Peak in Apr-Jun: {peak_m.isin([4, 5, 6]).sum()} of {n} years")
+print(f"Low in Dec-Feb:  {low_m.isin([12, 1, 2]).sum()} of {n} years")
+idx = full / full.groupby(yr).transform("mean") * 100
+prof = idx.groupby(full.index.month).mean()
+print("Average month as % of its year's mean:")
+print(prof.round(1).to_string())
+
+# ---- 2. Swing in units vs swing in percent --------------------------------
+g = full.groupby(yr)
+swing = pd.DataFrame({
+    "mean_level": g.mean(),
+    "swing_units": g.max() - g.min(),
+})
+swing["swing_pct"] = swing["swing_units"] / swing["mean_level"] * 100
+print("\nSeasonal swing by year (max month minus min month):")
+print(swing.round(1).to_string())
+r_units = swing["mean_level"].corr(swing["swing_units"])
+r_pct = swing["mean_level"].corr(swing["swing_pct"])
+print(f"\nCorrelation of level with swing in units:   {r_units:.2f}")
+print(f"Correlation of level with swing in percent: {r_pct:.2f}")
+
+# ---- 3. STL: seasonal amplitude in levels vs logs -------------------------
+amp = {}
+for name, s in [("levels", full), ("logs", np.log(full))]:
+    seas = STL(s, period=12, robust=True).fit().seasonal
+    a = seas.groupby(seas.index.year).agg(lambda x: x.max() - x.min())
+    amp[name] = a
+    print(f"STL seasonal amplitude ({name}): min {a.min():.3f}, max {a.max():.3f},"
+          f" max/min ratio {a.max() / a.min():.1f}")
+
+# ---- 4. ETS additive vs multiplicative season (AIC) -----------------------
+fits = {}
+for seas in ["add", "mul"]:
+    m = ExponentialSmoothing(full, trend="add", damped_trend=True,
+                             seasonal=seas, seasonal_periods=12,
+                             initialization_method="estimated").fit()
+    fits[seas] = m.aic
+    print(f"ETS damped trend, {seas} season: AIC {m.aic:.1f}")
+print("Lower AIC wins:", min(fits, key=fits.get))
+
+# ---- 5. Seasonal naive benchmark, last 36 months --------------------------
+test = y.iloc[-36:]
+sn = y.shift(12).iloc[-36:]
+naive1 = y.shift(1).iloc[-36:]
+mae_sn = (test - sn).abs().mean()
+mae_n1 = (test - naive1).abs().mean()
+print(f"\nLast 36 months: seasonal naive MAE {mae_sn:.1f}k vs naive (last month) MAE {mae_n1:.1f}k")
+
+# ---- Figure -----------------------------------------------------------------
+blue, grey = "#1f4e9c", "#9a9a9a"
+fig, axes = plt.subplots(1, 3, figsize=(15, 4.6))
+
+ax = axes[0]
+for year, grp in full.groupby(yr):
+    ax.plot(grp.index.month, grp.values, color=grey, lw=0.6, alpha=0.5)
+for year, col in [(2005, blue), (2011, "#d1495b")]:
+    s = full[full.index.year == year]
+    ax.plot(s.index.month, s.values, color=col, lw=2, label=str(year))
+ax.set_xticks(range(1, 13))
+ax.set_xticklabels(list("JFMAMJJASOND"))
+ax.set_title("A. Every year peaks in spring", loc="left")
+ax.set_xlabel("Month")
+ax.set_ylabel("Starts, thousands of units")
+ax.legend(frameon=False)
+
+ax = axes[1]
+ax.scatter(swing["mean_level"], swing["swing_units"], color=blue, s=22)
+for year in [2005, 2006, 2009, 2011, 2021, 2025]:
+    ax.annotate(str(year), (swing.loc[year, "mean_level"], swing.loc[year, "swing_units"]),
+                xytext=(4, 3), textcoords="offset points", fontsize=8, color="#555555")
+ax.set_title(f"B. Bigger level, bigger swing (r = {r_units:.2f})", loc="left")
+ax.set_xlabel("Average monthly starts that year, thousands")
+ax.set_ylabel("Peak minus low month, thousands")
+
+ax = axes[2]
+# STL removes the trend first, so a crash year's decline is not counted as swing.
+# Each line is that year's seasonal amplitude relative to its own 2000-2025 average.
+lv = amp["levels"] / amp["levels"].mean()
+lg = amp["logs"] / amp["logs"].mean()
+ax.plot(lv.index, lv.values, color=grey, lw=1.8,
+        label=f"Levels (max/min {amp['levels'].max() / amp['levels'].min():.1f}x)")
+ax.plot(lg.index, lg.values, color=blue, lw=1.8,
+        label=f"Logs (max/min {amp['logs'].max() / amp['logs'].min():.1f}x)")
+ax.axhline(1, color=grey, lw=0.8, ls="--")
+ax.set_ylim(0, max(lv.max(), lg.max()) * 1.25)
+ax.set_title("C. On logs, the seasonal swing is steadier", loc="left")
+ax.set_xlabel("Year")
+ax.set_ylabel("STL seasonal amplitude, 1 = average")
+ax.legend(frameon=False, loc="lower left")
+
+for a in axes:
+    a.grid(axis="y", color="#eeeeee")
+    for s in ("top", "right"):
+        a.spines[s].set_visible(False)
+fig.suptitle("Observation 1: housing starts have multiplicative seasonality",
+             x=0.01, ha="left", fontsize=13)
+fig.text(0.01, 0.005, "Single-family housing starts, not seasonally adjusted, 2000-2025. "
+         "Source: US Census Bureau via FRED (HOUST1FNSA).", fontsize=8, color="#555555")
+fig.tight_layout(rect=(0, 0.03, 1, 0.95))
+fig.savefig("observation1.png", dpi=200)
+print("\nSaved observation1.png")

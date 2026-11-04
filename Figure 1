@@ -1,0 +1,99 @@
+"""
+ECON 8310 Final Project Proposal: data loading proof + Figure 1.
+
+Usage:
+    python proposal_eda.py                 # downloads from FRED
+    python proposal_eda.py fredgraph.csv   # uses a CSV you downloaded
+    python proposal_eda.py monthly.csv "monthly,_end_of_month.csv"  # FRED zip
+
+Outputs:
+    housing_data.csv  - merged monthly data (+ months' supply)
+    figure1.png       - starts and sales over time, events shaded
+    Prints rows, first/last dates, and missing values for Section 2.
+"""
+import sys
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+
+IDS = ["HSN1FNSA", "HNFSUSNSA", "HOUST1FNSA", "PERMIT1NSA"]
+NAMES = {
+    "HSN1FNSA": "sold",
+    "HNFSUSNSA": "for_sale",
+    "HOUST1FNSA": "starts",
+    "PERMIT1NSA": "permits",
+}
+URL = ("https://fred.stlouisfed.org/graph/fredgraph.csv?id="
+       + ",".join(IDS) + "&cosd=2000-01-01")
+
+# ---- Load -----------------------------------------------------------------
+# Accepts the FRED URL, one CSV, or several CSVs (FRED's zip splits series
+# by frequency into e.g. monthly.csv and "monthly,_end_of_month.csv").
+srcs = sys.argv[1:] or [URL]
+frames = []
+for src in srcs:
+    part = pd.read_csv(src, na_values=["."])
+    date_col = "observation_date" if "observation_date" in part.columns else "DATE"
+    part[date_col] = pd.to_datetime(part[date_col])
+    frames.append(part.set_index(date_col))
+df = pd.concat(frames, axis=1).rename(columns=NAMES).sort_index()
+df = df[list(NAMES.values())].loc["2000-01-01":].dropna()  # common months only
+df["months_supply"] = df["for_sale"] / df["sold"]
+df.index.name = "date"
+df.to_csv("housing_data.csv")
+
+# ---- Proof of loading (paste into Section 2) -------------------------------
+print("Rows:", len(df))
+print("First month:", df.index.min().strftime("%B %Y"))
+print("Last month: ", df.index.max().strftime("%B %Y"))
+print("Missing values per column:")
+print(df.isna().sum().to_string())
+print()
+print(df.head(3).round(1).to_string())
+print("...")
+print(df.tail(3).round(1).to_string())
+
+# ---- Figure 1 ---------------------------------------------------------------
+events = [
+    ("2007-12-01", "2009-06-30", "Great Recession"),
+    ("2020-02-01", "2020-04-30", "COVID"),
+    ("2022-03-01", "2023-07-31", "Fed rate hikes"),
+]
+
+fig, ax = plt.subplots(figsize=(11, 5))
+ax.plot(df.index, df["starts"], color="#1f4e9c", lw=1.4,
+        label="Single-family housing starts (target)")
+ax.plot(df.index, df["sold"], color="#9a9a9a", lw=1.2,
+        label="New single-family houses sold")
+top = df[["starts", "sold"]].max().max()
+for start, end, label in events:
+    ax.axvspan(pd.Timestamp(start), pd.Timestamp(end),
+               color="#d9d9d9", alpha=0.6, lw=0)
+    ax.text(pd.Timestamp(start), top * 1.10, " " + label,
+            fontsize=8, color="#555555", va="top")
+ax.set_ylim(0, top * 1.12)
+
+# Label the all-time high and low of starts in this window
+hi, lo = df["starts"].idxmax(), df["starts"].idxmin()
+ax.annotate(f"Peak {df.loc[hi, 'starts']:.0f}k ({hi:%b %Y})", (hi, df.loc[hi, "starts"]),
+            xytext=(-150, -5), textcoords="offset points", fontsize=8,
+            color="#1f4e9c", arrowprops=dict(arrowstyle="-", color="#1f4e9c", lw=0.6))
+ax.annotate(f"Low {df.loc[lo, 'starts']:.0f}k ({lo:%b %Y})", (lo, df.loc[lo, "starts"]),
+            xytext=(25, -12), textcoords="offset points", fontsize=8,
+            color="#1f4e9c", arrowprops=dict(arrowstyle="-", color="#1f4e9c", lw=0.6))
+
+ax.set_title("US single-family housing starts and new home sales, monthly, "
+             "not seasonally adjusted", pad=28)
+ax.set_xlabel("Month")
+ax.set_ylabel("Thousands of units per month")
+ax.xaxis.set_major_locator(mdates.YearLocator(2))
+ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+ax.grid(axis="y", color="#eeeeee")
+for s in ("top", "right"):
+    ax.spines[s].set_visible(False)
+ax.legend(frameon=False, loc="lower left", bbox_to_anchor=(0, 1.0), ncol=2)
+fig.text(0.01, 0.01, "Source: US Census Bureau via FRED "
+         "(HOUST1FNSA, HSN1FNSA).", fontsize=8, color="#555555")
+fig.tight_layout(rect=(0, 0.03, 1, 1))
+fig.savefig("figure1.png", dpi=200)
+print("\nSaved figure1.png and housing_data.csv")
